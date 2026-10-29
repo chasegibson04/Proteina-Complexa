@@ -12,10 +12,10 @@ from openfold.data import data_transforms
 from openfold.np.residue_constants import atom_types
 from torch.nn import functional as F
 from torch.nn.utils.rnn import pad_sequence
-from torch_scatter import scatter_mean
 
 from proteinfoundation.utils.angle_utils import bond_angles, signed_dihedral_angle
 from proteinfoundation.utils.fold_utils import extract_cath_code_by_level
+from proteinfoundation.utils.scatter_utils import scatter_mean
 from proteinfoundation.utils.tensor_utils import concat_padded_tensor
 
 BOND_ORDER_MAP = {

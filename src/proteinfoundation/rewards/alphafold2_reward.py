@@ -97,6 +97,8 @@ class AF2RewardModel(BaseRewardModel):
             device_id: GPU device ID to use. If None, auto-detects current CUDA device.
         """
         if device_id is None:
+            # JAX picks its own device; this id only selects which GPU AF2 is
+            # pinned to when several CUDA devices are present.
             device_id = torch.cuda.current_device() if torch.cuda.is_available() else 0
 
         self.protocol = protocol

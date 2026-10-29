@@ -7,12 +7,12 @@ import lightning as L
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import torch
 from dotenv import load_dotenv
 from loguru import logger
 from sklearn.decomposition import PCA
 
 from proteinfoundation.partial_autoencoder.autoencoder import AutoEncoder
+from proteinfoundation.utils.device_utils import log_device_banner
 
 COLORS_RT = [
     "#FF0000",  # Red
@@ -103,7 +103,7 @@ def setup(
     """
     logger.info(" ".join(sys.argv))
 
-    assert torch.cuda.is_available(), "CUDA not available"  # Needed for ESMfold and designability
+    log_device_banner()  # CUDA, ROCm, DirectML, MPS or CPU -- see utils/device_utils.py
     logger.add(
         sys.stdout,
         format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {file}:{line} | {message}",

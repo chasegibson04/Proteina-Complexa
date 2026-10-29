@@ -4,7 +4,6 @@ import random
 
 import torch
 from loguru import logger
-from torch_scatter import scatter_mean
 
 from proteinfoundation.nn.feature_factory.base_feature import Feature
 from proteinfoundation.nn.feature_factory.feature_utils import (
@@ -14,6 +13,7 @@ from proteinfoundation.nn.feature_factory.feature_utils import (
     sinusoidal_encoding,
 )
 from proteinfoundation.utils.fold_utils import extract_cath_code_by_level
+from proteinfoundation.utils.scatter_utils import scatter_mean
 
 
 class FoldEmbeddingSeqFeat(Feature):

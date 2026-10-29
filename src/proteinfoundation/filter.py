@@ -6,9 +6,10 @@ from typing import Any
 import hydra
 import lightning as L
 import pandas as pd
-import torch
 from dotenv import load_dotenv
 from loguru import logger
+
+from proteinfoundation.utils.device_utils import log_device_banner
 
 
 def _get_filter_cfg(cfg) -> Any:
@@ -51,7 +52,7 @@ def setup(
     """
     logger.info(" ".join(sys.argv))
 
-    assert torch.cuda.is_available(), "CUDA not available"  # Needed for ESMfold and designability
+    log_device_banner()  # CUDA, ROCm, DirectML, MPS or CPU -- see utils/device_utils.py
     logger.add(
         sys.stdout,
         format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {file}:{line} | {message}",

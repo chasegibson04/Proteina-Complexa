@@ -15,6 +15,8 @@ import pandas as pd
 import torch
 from loguru import logger
 
+from proteinfoundation.utils.device_utils import empty_cache, get_device
+
 # =============================================================================
 # Safe Imports
 # =============================================================================
@@ -59,11 +61,14 @@ def compute_pseudo_perplexity(
     model,
     tokenizer,
     sequence: str,
-    device: str = "cuda",
+    device: str | torch.device | None = None,
 ) -> tuple[float, float]:
     """Compute pseudo-perplexity for a single sequence."""
     if not sequence or len(sequence) == 0:
         return np.nan, np.nan
+
+    if device is None:
+        device = get_device()
 
     try:
         inputs = tokenizer(sequence, return_tensors="pt").to(device)
@@ -171,7 +176,7 @@ def get_esm_model(
     cache_dir = _resolve_cache_dir()
 
     if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = get_device()
 
     # Try ESM_DIR first (pre-downloaded local copy), then HF cache
     load_locations = []
@@ -246,7 +251,7 @@ def clear_esm_cache():
             "model_name": None,
             "device": None,
         }
-        torch.cuda.empty_cache()
+        empty_cache()
         logger.info("Cleared ESM model cache")
 
 

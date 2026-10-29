@@ -22,6 +22,8 @@
 import einops
 import torch
 
+from proteinfoundation.utils.device_utils import eye as device_eye
+
 
 def mean_w_mask(a, mask, keepdim=True):
     """
@@ -217,7 +219,8 @@ def _find_rot_alignment(A, B, mask=None):
     det_R = torch.linalg.det(R.to(torch.float32))  # [b], breaks with mixed precision
     # det_R = torch.linalg.det(R)  # [b]
     det_R = torch.linalg.det(R.to(torch.float32))  # [b], breaks with mixed precision
-    SS = torch.eye(3, device=R.device).repeat(A.shape[0], 1, 1)  # Shape [b, 3, 3]
+    # device_eye, not torch.eye: on DirectML torch.eye returns an empty tensor.
+    SS = device_eye(3, device=R.device, dtype=R.dtype).repeat(A.shape[0], 1, 1)  # Shape [b, 3, 3]
     SS[:, -1, -1] = torch.where(
         det_R < 0,
         torch.tensor(-1.0, device=R.device),

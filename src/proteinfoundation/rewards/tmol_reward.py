@@ -49,6 +49,7 @@ from tmol.score.score_function import ScoreFunction
 from tmol.score.score_types import ScoreType
 
 from proteinfoundation.rewards.base_reward import REWARD_KEY, BaseRewardModel, standardize_reward
+from proteinfoundation.utils.device_utils import empty_cache, get_device
 
 
 def make_atom14_masks(protein):
@@ -186,7 +187,7 @@ class TmolRewardModel(BaseRewardModel):
                 used instead of the generated PDB (resolved by CompositeRewardModel).
         """
         if device is None:
-            device = torch.device("cuda")
+            device = get_device()
         self.device = device
         self.structure_source = structure_source
         self.enable_hbond = enable_hbond
@@ -566,8 +567,7 @@ class TmolRewardModel(BaseRewardModel):
         """Clean up model state and memory."""
         self._clear_model_state()
         gc.collect()
-        if self.device.type == "cuda":
-            torch.cuda.empty_cache()
+        empty_cache()
 
     def cleanup(self) -> None:
         """Explicit cleanup of model memory.
@@ -604,7 +604,7 @@ def analyze_interface_interactions(
         Dictionary with interface interaction analysis results
     """
     if device is None:
-        device = torch.device("cuda")
+        device = get_device()
     energy_model = TmolRewardModel(
         device=device,
         enable_hbond=enable_hbond,
@@ -726,7 +726,7 @@ def analyze_interface_hbonds(
         Dictionary with H-bond analysis results
     """
     if device is None:
-        device = torch.device("cuda")
+        device = get_device()
     return analyze_interface_interactions(
         pdb_path=pdb_path,
         openfold_dict=openfold_dict,

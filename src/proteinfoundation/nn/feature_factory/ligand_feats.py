@@ -1,10 +1,10 @@
 import torch
 from loguru import logger
-from torch.nn import functional as F
 
 from proteinfoundation.nn.feature_factory.base_feature import Feature
 from proteinfoundation.nn.feature_factory.feature_utils import NUM_BOND_ORDERS
 from proteinfoundation.nn.feature_factory.seq_feats import AtomisticCoorsSeqFeat
+from proteinfoundation.utils.device_utils import one_hot as device_one_hot
 
 
 class TargetChargeSeqFeat(Feature):
@@ -70,7 +70,7 @@ class AtomTypeSeqFeat(Feature):
             rtype = rtype * rpadmask[..., None]
             rtype_onehot = rtype
         else:
-            rtype_onehot = F.one_hot(rtype, num_classes=self.dim)  # [b, n, dim]
+            rtype_onehot = device_one_hot(rtype, num_classes=self.dim)  # [b, n, dim]
             rtype_onehot = rtype_onehot * rpadmask[..., None]  # zero out padding rows just in case
         return rtype_onehot * 1.0
 
@@ -108,7 +108,7 @@ class BondOrderPairFeat(Feature):
         super().__init__(dim=NUM_BOND_ORDERS)
 
     def forward(self, batch):
-        return F.one_hot(batch["target_bond_order"].long(), num_classes=self.dim)
+        return device_one_hot(batch["target_bond_order"].long(), num_classes=self.dim)
 
 
 class LigandConcatSeqFeat(Feature):

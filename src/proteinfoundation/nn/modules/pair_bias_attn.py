@@ -27,6 +27,7 @@ from einops import rearrange
 from torch import Tensor, einsum, nn
 
 from proteinfoundation.nn.modules.adaptive_ln_scale import AdaptiveLayerNorm, AdaptiveOutputScale
+from proteinfoundation.utils.device_utils import autocast_dtype
 
 # Large negative value for masking (not -inf to avoid gradient issues)
 NEG_INF = -1e4
@@ -182,8 +183,10 @@ class FlashPairBiasAttention(nn.Module):
         Returns:
             Updated node features of shape (b, n, d_s).
         """
-        # Get target dtype for flash attention (handles autocast)
-        target_dtype = torch.get_autocast_gpu_dtype() if torch.is_autocast_enabled() else node_feats.dtype
+        # Get target dtype for flash attention (handles autocast).
+        # autocast_dtype() is backend-aware: torch.get_autocast_gpu_dtype() is CUDA-only
+        # and deprecated, and it can return bfloat16, which aborts on DirectML.
+        target_dtype = autocast_dtype(default=node_feats.dtype)
 
         node_feats = self.node_norm(node_feats)
         h = self.heads

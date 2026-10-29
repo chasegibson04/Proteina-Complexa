@@ -11,6 +11,7 @@ from transformers import logging as hf_logging
 from proteinfoundation.metrics.folding_models import run_colabfold, run_esmfold
 from proteinfoundation.metrics.inverse_folding_models import run_proteinmpnn
 from proteinfoundation.metrics.metric_utils import rmsd_metric
+from proteinfoundation.utils.device_utils import get_device
 from proteinfoundation.utils.pdb_utils import extract_seq_from_pdb, load_pdb, pdb_name_from_path
 
 hf_logging.set_verbosity_error()
@@ -293,7 +294,7 @@ def run_esmfold_multimer(
     stats = []
     os.makedirs(path_to_esmfold_out, exist_ok=True)
     esm_model = esm.pretrained.esmfold_v1()
-    esm_model = esm_model.eval().cuda()
+    esm_model = esm_model.eval().to(get_device())
     out_esm_paths = []
     for seq_num, seq in enumerate(seqs):
         fname = f"esm_{seq_num + 1}.pdb"

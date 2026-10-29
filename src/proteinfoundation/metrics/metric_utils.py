@@ -25,6 +25,7 @@ from transformers import logging as hf_logging
 
 from proteinfoundation.utils.align_utils import kabsch_align_ind
 from proteinfoundation.utils.coors_utils import get_atom37_bb3_mask, get_atom37_bb3o_mask, get_atom37_ca_mask
+from proteinfoundation.utils.device_utils import get_backend
 
 hf_logging.set_verbosity_error()
 
@@ -117,7 +118,7 @@ def relax_protein(
     unrelaxed_pdb_path: str,
     output_directory: str,
     output_name: str,
-    model_device: str = "cuda:0",
+    model_device: str | None = None,
 ) -> str:
     """Relaxes a protein structure using Amber molecular dynamics.
 
@@ -129,7 +130,9 @@ def relax_protein(
         unrelaxed_pdb_path: Path to the input PDB file containing the unrelaxed structure.
         output_directory: Directory where the relaxed structure will be saved.
         output_name: Base name for the output file (without extension).
-        model_device: Device to use for computation. Defaults to "cuda:0".
+        model_device: Device to use for computation. Defaults to the active
+            backend's device. OpenMM's Amber relaxation only has a CUDA GPU
+            platform, so non-CUDA backends relax on the CPU.
 
     Returns:
         Path to the relaxed PDB file.
@@ -138,6 +141,11 @@ def relax_protein(
         RuntimeError: If the relaxation process fails.
     """
     from openfold.np.relax import relax
+
+    # OpenMM's Amber relaxation inside openfold only ships a CUDA platform, so a
+    # DirectML/MPS GPU cannot drive it; those backends relax on the CPU instead.
+    if model_device is None:
+        model_device = "cuda:0" if get_backend() in ("cuda", "rocm") else "cpu"
 
     os.makedirs(output_directory, exist_ok=True)
     amber_relaxer = relax.AmberRelaxation(

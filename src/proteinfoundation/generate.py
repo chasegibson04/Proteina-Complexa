@@ -28,6 +28,8 @@ from omegaconf import open_dict
 from proteinfoundation.proteina import Proteina
 from proteinfoundation.rewards.base_reward import TOTAL_REWARD_KEY
 from proteinfoundation.utils.config_utils import filter_config_for_logging
+from proteinfoundation.utils.device_utils import log_device_banner
+from proteinfoundation.utils.lightning_backends import make_trainer
 from proteinfoundation.utils.lora_utils import replace_lora_layers
 from proteinfoundation.utils.pdb_utils import write_prot_to_pdb
 
@@ -49,7 +51,7 @@ def setup(
     """
     logger.info(" ".join(sys.argv))
 
-    assert torch.cuda.is_available(), "CUDA not available"  # Needed for ESMfold and designability
+    log_device_banner()  # CUDA, ROCm, DirectML, MPS or CPU -- see utils/device_utils.py
     logger.add(
         sys.stdout,
         format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {file}:{line} | {message}",
@@ -648,13 +650,11 @@ def main(cfg):
         model.ligand = ligand  # shouldn't be set here, but pass in dataset
 
     # Sample model
-    trainer = L.Trainer(
-        accelerator="gpu",
-        devices=1,
+    trainer = make_trainer(
         logger=False,
         enable_checkpointing=False,
         inference_mode=False,
-    )  # set it to False, as we need refinement in predict step
+    )  # inference_mode False, as we need refinement in predict step
     predictions = trainer.predict(model, dataloader)
     # predictions is now a list of dicts (one per batch), each dict contains:
     # - 'coors': [batch_size, n, 37, 3]

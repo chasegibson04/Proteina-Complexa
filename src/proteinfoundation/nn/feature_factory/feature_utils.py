@@ -4,6 +4,8 @@ import torch
 from jaxtyping import Float
 from torch.nn import functional as F
 
+from proteinfoundation.utils.device_utils import one_hot as device_one_hot
+
 BOND_ORDER_MAP = {
     -1: 0,
     0: 1,
@@ -134,7 +136,8 @@ def bin_and_one_hot(tensor, bin_limits):
         torch.Tensor: Output tensor of shape [*, d] where d = len(bin_limits) + 1
     """
     bin_indices = torch.bucketize(tensor, bin_limits)
-    return torch.nn.functional.one_hot(bin_indices, len(bin_limits) + 1) * 1.0
+    # device_one_hot, not F.one_hot: aten::one_hot is broken on DirectML.
+    return device_one_hot(bin_indices, len(bin_limits) + 1) * 1.0
 
 
 def indices_force_start_w_one(pdb_idx, mask):
