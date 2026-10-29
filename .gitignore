@@ -104,8 +104,8 @@ tests/test_eval_generated/
 .claude.json*
 params
 
-# Local validation data from the PTC 766 project (not for publication)
-validation_766ptc/
-configs/targets/local_targets_dict.yaml
-configs/local_766ptc_pyo.yaml
-configs/local_stock_7v11.yaml
+# Local validation data and machine-specific run configs. Useful for checking a
+# backend against real structures without committing them.
+validation_*/
+configs/local_*.yaml
+configs/targets/local_*.yaml

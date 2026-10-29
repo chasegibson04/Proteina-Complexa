@@ -120,6 +120,14 @@ Scalars are untouched, and `bool * bool` stays bool so pair masks still work.
 The patch is installed automatically by `get_backend()`, so no code path can
 reach a DirectML tensor without it.
 
+### `torch.cdist` returns the wrong shape
+
+Also silent. `torch.cdist(a, b)` on `[2, 7, 3]` and `[2, 5, 3]` returns
+`[2, 1, 7, 1]` instead of `[2, 7, 5]`, with no error, so the result broadcasts
+into plausible nonsense wherever pairwise distances feed the pair
+representation. `_install_directml_compat()` replaces it with an equivalent
+built from ops that are correct on this backend.
+
 ### Three operations are broken outright
 
 | Operation | Behaviour | Workaround |

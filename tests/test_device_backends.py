@@ -286,6 +286,35 @@ def test_masking_preserves_values_where_mask_is_true():
     torch.testing.assert_close(out[0, 2:], torch.zeros(2, 3))
 
 
+def test_cdist_has_the_right_shape():
+    """Regression: DirectML's cdist returns [b, 1, n, 1] instead of [b, n, m].
+
+    No error is raised, so the wrong shape broadcasts into plausible nonsense
+    wherever pairwise distances feed the pair representation.
+    """
+    device = get_device()
+    a = torch.randn(2, 7, 3, device=device)
+    b = torch.randn(2, 5, 3, device=device)
+    assert tuple(torch.cdist(a, b).shape) == (2, 7, 5)
+
+
+def test_cdist_matches_cpu_values():
+    torch.manual_seed(0)
+    a_cpu = torch.randn(2, 6, 3)
+    b_cpu = torch.randn(2, 4, 3)
+    device = get_device()
+    got = torch.cdist(a_cpu.to(device), b_cpu.to(device)).cpu()
+    expected = torch.sqrt(((a_cpu.unsqueeze(-2) - b_cpu.unsqueeze(-3)) ** 2).sum(-1))
+    torch.testing.assert_close(got, expected, rtol=1e-4, atol=1e-5)
+
+
+def test_cdist_self_distance_diagonal_is_zero():
+    device = get_device()
+    p = torch.randn(1, 8, 3, device=device)
+    d = torch.cdist(p, p).cpu()
+    torch.testing.assert_close(torch.diagonal(d, dim1=-2, dim2=-1), torch.zeros(1, 8), atol=1e-4, rtol=0)
+
+
 def test_masked_mean_matches_cpu():
     """align_utils.mean_w_mask ran torch.where on mixed dtypes and segfaulted."""
     from proteinfoundation.utils.align_utils import mean_w_mask

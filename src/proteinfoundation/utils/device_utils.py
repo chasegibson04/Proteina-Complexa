@@ -23,15 +23,32 @@ Selection order is ``cuda/rocm -> directml -> mps -> cpu`` and can be overridden
 with the ``COMPLEXA_DEVICE`` environment variable (``auto``, ``cuda``, ``rocm``,
 ``directml``, ``mps``, ``cpu``, or an explicit string like ``cuda:1``).
 
-Backend quirks this module exists to absorb
--------------------------------------------
-* **DirectML aborts the process on bfloat16.**  It is not a Python exception --
-  the native layer calls ``abort()``.  :func:`autocast_dtype` and
-  :func:`resolve_precision` therefore never hand bf16 to DirectML.
-* **DirectML lacks** ``linalg.inv``/``eigh``/``solve``.  :func:`cpu_fallback`
-  runs those on the CPU and moves the result back.
-* **DirectML has no** ``torch.cuda`` **module**, so cache/synchronise helpers
-  must be guarded.
+DirectML defects this module absorbs
+------------------------------------
+All were found by running the model on an RX 6800, not from documentation.
+The first is silent corruption rather than a crash, which is why the fix is
+applied globally instead of at the call sites.
+
+* **``float * bool`` returns bool and discards the values.**  ``x * mask[...,
+  None]`` is the masking idiom used throughout the flow matcher and feature
+  factories, so this destroyed coordinates at the first mask with nothing
+  raised.  :func:`_install_directml_compat` repairs multiplication itself.
+* **``torch.eye(device=...)`` returns an empty tensor**, and the next operation
+  on it dies with ``std::system_error``.  Use :func:`eye`.
+* **``F.one_hot`` and ``Tensor.scatter_add_`` are broken.**  Use :func:`one_hot`
+  and :mod:`proteinfoundation.utils.scatter_utils`.
+* **Mixed-dtype ``torch.where`` segfaults**, e.g. guarding an int64 count with a
+  float scalar.
+* **``torch.inference_mode`` is unsafe** -- operating on a view of a batch
+  tensor inside it raises "Cannot set version_counter for inference tensor".
+  Use :func:`inference_context`.
+* **bfloat16 aborts the process** in native code, so it cannot be caught in
+  Python.  :func:`autocast_dtype` and :func:`resolve_precision` never hand bf16
+  to DirectML.
+* **``linalg.inv``/``eigh``/``solve`` fail.**  Route them through
+  :func:`cpu_fallback`.
+* **There is no ``torch.cuda`` module**, so cache and synchronise helpers are
+  guarded.
 """
 
 from __future__ import annotations
@@ -60,6 +77,7 @@ __all__ = [
     "get_device",
     "inference_context",
     "is_gpu_available",
+    "log_device_banner",
     "one_hot",
     "require_gpu",
     "resolve_precision",
@@ -448,7 +466,12 @@ _directml_compat_installed = False
 
 
 def _install_directml_compat() -> None:
-    """Repair DirectML's type promotion for ``float * bool``.
+    """Repair DirectML defects that corrupt results without raising.
+
+    Two patches, both applied globally rather than at call sites because the
+    failures are silent and a missed site leaves wrong numbers behind.
+
+    **1. ``float * bool`` returns bool and discards the values.**
 
     This is the most dangerous DirectML defect found: multiplying a float
     tensor by a bool tensor returns a **bool** tensor and discards the values,
@@ -467,6 +490,10 @@ def _install_directml_compat() -> None:
     Patching multiplication itself fixes every site at once, including the
     vendored openfold and colabdesign code. Scalars are untouched, and
     ``bool * bool`` stays bool so pair masks still work.
+
+    **2. ``torch.cdist`` returns the wrong shape**: ``[b, 1, n, 1]`` instead of
+    ``[b, n, m]``, again with no error, so the result broadcasts into plausible
+    nonsense wherever pairwise distances are used.
 
     Idempotent, and a no-op on every backend other than DirectML.
     """
@@ -503,7 +530,18 @@ def _install_directml_compat() -> None:
     torch.Tensor.mul_ = patched_mul_
     torch.Tensor.__imul__ = patched_mul_
 
-    logger.debug("Installed DirectML float*bool promotion fix")
+    # torch.cdist returns the wrong SHAPE on DirectML -- [b, 1, n, 1] instead of
+    # [b, n, m] -- with no error, so the result broadcasts into plausible
+    # nonsense. Compute it from ops that are known good on this backend.
+    def patched_cdist(x1: torch.Tensor, x2: torch.Tensor, p: float = 2.0, **kwargs: Any) -> torch.Tensor:
+        diff = x1.unsqueeze(-2) - x2.unsqueeze(-3)
+        if p == 2.0:
+            return torch.sqrt((diff * diff).sum(-1).clamp(min=0.0))
+        return diff.abs().pow(p).sum(-1).pow(1.0 / p)
+
+    torch.cdist = patched_cdist
+
+    logger.debug("Installed DirectML compatibility fixes (float*bool promotion, cdist)")
 
 
 def inference_context() -> Any:
