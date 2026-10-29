@@ -13,6 +13,7 @@ from omegaconf import OmegaConf
 
 from proteinfoundation.flow_matching.product_space_flow_matcher import ProductSpaceFlowMatcher
 from proteinfoundation.nn.genie2 import Genie2Denoiser
+from proteinfoundation.utils.device_utils import inference_context
 from proteinfoundation.utils.file_utils import create_dir as _create_dir
 from proteinfoundation.utils.sample_utils import add_clean_samples, sample_formatting
 from proteinfoundation.utils.training_handlers import handle_batch_conditioning
@@ -687,7 +688,10 @@ class Proteina(L.LightningModule):
     # predict_step
     # ------------------------------------------------------------------
 
-    @torch.inference_mode(mode=True)
+    # inference_context(), not torch.inference_mode(): DirectML raises
+    # "Cannot set version_counter for inference tensor" inside the flow
+    # matcher, so that backend falls back to torch.no_grad().
+    @inference_context()
     def predict_step(self, batch: dict, batch_idx: int) -> dict:
         """Run search → (optional) refinement → reward scoring → combine.
 

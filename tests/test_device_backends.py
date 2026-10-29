@@ -236,6 +236,119 @@ def test_one_hot_stays_on_device():
     assert device_one_hot(idx, num_classes=2).device == get_device()
 
 
+# ------------------------------------------------ type-promotion integrity ---
+
+
+def test_float_times_bool_mask_stays_float():
+    """Regression: on DirectML `float * bool` returned bool and dropped the data.
+
+    `x * mask[..., None]` is the masking idiom used throughout the flow matcher
+    and feature factories, so this silently corrupted every masked tensor.
+    """
+    device = get_device()
+    x = torch.randn(2, 4, 3, device=device)
+    mask = torch.ones(2, 4, 1, dtype=torch.bool, device=device)
+    mask[1, 2:] = False
+
+    out = x * mask
+    assert out.dtype == x.dtype, f"float * bool produced {out.dtype}, expected {x.dtype}"
+    torch.testing.assert_close(out.cpu(), x.cpu() * mask.cpu().to(x.dtype), rtol=1e-5, atol=1e-6)
+
+
+def test_bool_times_float_reflected_also_promotes():
+    device = get_device()
+    x = torch.randn(2, 4, 3, device=device)
+    mask = torch.ones(2, 4, 1, dtype=torch.bool, device=device)
+    assert (mask * x).dtype == x.dtype
+
+
+def test_bool_times_bool_stays_bool():
+    """Pair masks are built as `mask[..., None, :] * mask[..., None]`."""
+    device = get_device()
+    mask = torch.ones(2, 4, dtype=torch.bool, device=device)
+    pair = mask[..., None, :] * mask[..., None]
+    assert pair.dtype == torch.bool
+
+
+def test_scalar_multiply_is_unaffected():
+    device = get_device()
+    x = torch.randn(4, 4, device=device)
+    torch.testing.assert_close((x * 2.0).cpu(), x.cpu() * 2.0)
+
+
+def test_masking_preserves_values_where_mask_is_true():
+    """The corruption showed up as lost values, not just a wrong dtype."""
+    device = get_device()
+    x = torch.arange(12, dtype=torch.float32, device=device).reshape(1, 4, 3)
+    mask = torch.tensor([[True, True, False, False]], device=device)[..., None]
+    out = (x * mask).cpu()
+    torch.testing.assert_close(out[0, :2], x.cpu()[0, :2])
+    torch.testing.assert_close(out[0, 2:], torch.zeros(2, 3))
+
+
+def test_masked_mean_matches_cpu():
+    """align_utils.mean_w_mask ran torch.where on mixed dtypes and segfaulted."""
+    from proteinfoundation.utils.align_utils import mean_w_mask
+
+    device = get_device()
+    torch.manual_seed(0)
+    a_cpu = torch.randn(2, 6, 3)
+    mask_cpu = torch.ones(2, 6, dtype=torch.bool)
+    mask_cpu[1, 4:] = False
+
+    got = mean_w_mask(a_cpu.to(device), mask_cpu.to(device))
+    expected = mean_w_mask(a_cpu, mask_cpu)
+    torch.testing.assert_close(got.cpu(), expected, rtol=1e-4, atol=1e-5)
+
+
+def test_masked_mean_of_fully_masked_row_is_zero():
+    """An all-False row must give 0, not NaN from a 0/0 divide."""
+    from proteinfoundation.utils.align_utils import mean_w_mask
+
+    device = get_device()
+    a = torch.randn(1, 4, 3, device=device)
+    mask = torch.zeros(1, 4, dtype=torch.bool, device=device)
+    out = mean_w_mask(a, mask).cpu()
+    assert not torch.isnan(out).any()
+    torch.testing.assert_close(out, torch.zeros_like(out))
+
+
+# ------------------------------------------------------- inference context ---
+
+
+def test_inference_context_is_usable_as_context_manager():
+    from proteinfoundation.utils.device_utils import inference_context
+
+    device = get_device()
+    with inference_context():
+        x = torch.randn(2, 4, 3, device=device)
+        mask = torch.ones(2, 4, dtype=torch.bool, device=device)
+        # Exactly the flow-matcher pattern that failed under inference_mode.
+        out = (x - x.mean(dim=-2, keepdim=True)) * mask[..., None]
+    assert out.shape == (2, 4, 3)
+    assert torch.isfinite(out.cpu()).all()
+
+
+def test_inference_context_works_as_decorator():
+    from proteinfoundation.utils.device_utils import inference_context
+
+    @inference_context()
+    def run():
+        return torch.randn(4, 4, device=get_device()).sum()
+
+    assert torch.isfinite(run().cpu())
+
+
+def test_directml_avoids_inference_mode():
+    from proteinfoundation.utils.device_utils import inference_context
+
+    ctx = inference_context()
+    if get_backend() == BACKEND_DIRECTML:
+        assert isinstance(ctx, torch.no_grad)
+    else:
+        assert isinstance(ctx, torch.inference_mode)
+
+
 # --------------------------------------------------------------- to_device ---
 
 

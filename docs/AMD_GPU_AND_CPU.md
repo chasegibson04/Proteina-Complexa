@@ -90,7 +90,37 @@ the upstream default precision is `bf16-mixed`, `resolve_precision()` rewrites
 it to `32-true` on DirectML and `supports_bfloat16()` returns `False`. Use fp32
 or fp16.
 
-### Three operations are broken
+### `float * bool` silently corrupts data
+
+This is the most dangerous defect found, and the one most worth knowing about
+if you are porting any other model to DirectML.
+
+```python
+x = torch.randn(2, 4, 3, device=dml)
+m = torch.ones(2, 4, 1, dtype=torch.bool, device=dml)
+(x * m).dtype      # torch.bool  -- on CPU and CUDA this is torch.float32
+```
+
+The result is a **bool tensor and the values are gone**. Every other backend
+promotes to float. `x * mask[..., None]` is the standard masking idiom in this
+codebase and appears in roughly forty places across the flow matcher and the
+feature factories, so on DirectML the model was destroying its own coordinates
+at the first mask.
+
+It is dangerous because it is silent: bool is a legal dtype, so nothing raises
+at the point of corruption. The only reason it surfaced at all is that a later
+subtraction refuses bool operands. Had the next operation been another
+multiply, the run would have completed and produced confident nonsense.
+
+Rather than patch forty call sites — where the first one missed would leave
+silent corruption behind — `device_utils` repairs multiplication itself when
+the DirectML backend is selected, via `_install_directml_compat()`. That fixes
+every site at once, including the vendored openfold and colabdesign code.
+Scalars are untouched, and `bool * bool` stays bool so pair masks still work.
+The patch is installed automatically by `get_backend()`, so no code path can
+reach a DirectML tensor without it.
+
+### Three operations are broken outright
 
 | Operation | Behaviour | Workaround |
 |---|---|---|
@@ -101,6 +131,21 @@ or fp16.
 The `torch.eye` defect is the nastiest of the three: it is silent at the point
 of creation, and it sat directly in the Kabsch alignment path
 (`utils/align_utils.py`), which runs on every generated structure.
+
+### Mixed-dtype `torch.where` segfaults
+
+`torch.where(int64_tensor == 0, torch.tensor(1.0), int64_tensor)` — guarding a
+divide by replacing zero counts — segfaults on DirectML because the operands
+have different dtypes. `align_utils.mean_w_mask` now uses `clamp(min=1)`, which
+says the same thing without the mixed-dtype branch.
+
+### `torch.inference_mode` is unsafe
+
+Operating on a view of a batch tensor inside `torch.inference_mode()` raises
+`RuntimeError: Cannot set version_counter for inference tensor` on DirectML,
+which kills sampling in the flow matcher. `device_utils.inference_context()`
+returns `torch.inference_mode()` on backends that support it and
+`torch.no_grad()` on DirectML.
 
 ### linalg routines fall back to the CPU
 

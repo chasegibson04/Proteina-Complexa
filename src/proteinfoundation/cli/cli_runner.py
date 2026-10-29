@@ -716,7 +716,14 @@ def run_step(
             for job_id in range(stage_njobs):
                 job_cmd = cmd + [f"++job_id={job_id}"]
                 job_env = env.copy()
-                job_env["CUDA_VISIBLE_DEVICES"] = str(job_id)
+                # One GPU per job only makes sense where CUDA_VISIBLE_DEVICES is
+                # honoured. On DirectML/MPS/CPU it would pin jobs to a device
+                # that does not exist, so leave the environment alone there.
+                # Imported lazily: this launcher avoids importing torch.
+                from proteinfoundation.utils.device_utils import get_backend
+
+                if get_backend() in ("cuda", "rocm"):
+                    job_env["CUDA_VISIBLE_DEVICES"] = str(job_id)
                 if design_parallel:
                     job_log = stage_log_dir / f"{step_name}_job{job_id}.log"
                     if job_log.exists():

@@ -40,10 +40,16 @@ def mean_w_mask(a, mask, keepdim=True):
     """
     mask = mask[..., None]  # [*, n, 1]
     num_elements = torch.sum(mask, dim=-2, keepdim=True)  # [*, 1, 1]
-    num_elements = torch.where(num_elements == 0, torch.tensor(1.0), num_elements)  # [*, 1, 1]
+    is_empty = num_elements == 0  # [*, 1, 1], rows with nothing to average
+
+    # clamp, not torch.where(.. , torch.tensor(1.0), ..): guarding the divide
+    # with a float scalar against this int64 count is a mixed-dtype where, which
+    # segfaults on DirectML. clamp keeps the dtype and says the same thing.
+    num_elements = num_elements.clamp(min=1)  # [*, 1, 1]
+
     a_masked = torch.masked_fill(a, ~mask, 0.0)  # [*, n, d]
     mean = torch.sum(a_masked, dim=-2, keepdim=True) / num_elements  # [*, 1, d]
-    mean = torch.masked_fill(mean, num_elements == 0, 0.0)  # [*, 1, d]
+    mean = torch.masked_fill(mean, is_empty, 0.0)  # [*, 1, d]
     if not keepdim:
         mean = einops.rearrange(mean, "... () d -> ... d")
     return mean

@@ -58,6 +58,7 @@ __all__ = [
     "eye",
     "get_backend",
     "get_device",
+    "inference_context",
     "is_gpu_available",
     "one_hot",
     "require_gpu",
@@ -114,9 +115,8 @@ def _mps_usable() -> bool:
         return False
 
 
-@functools.lru_cache(maxsize=1)
-def get_backend() -> str:
-    """Return the backend in use: one of the ``BACKEND_*`` constants.
+def _resolve_backend() -> str:
+    """Resolve the backend to use: one of the ``BACKEND_*`` constants.
 
     Honours ``COMPLEXA_DEVICE``. An explicit request for an unavailable backend
     is a hard error rather than a silent downgrade -- a benchmark that quietly
@@ -164,6 +164,25 @@ def get_backend() -> str:
         return BACKEND_MPS
 
     return BACKEND_CPU
+
+
+@functools.lru_cache(maxsize=1)
+def get_backend() -> str:
+    """Return the active backend, installing any backend compatibility fixes.
+
+    Cached wrapper around :func:`_resolve_backend`; see that function for the
+    selection rules and the ``COMPLEXA_DEVICE`` override.
+
+    Selecting DirectML also installs the ``float * bool`` promotion fix (see
+    :func:`_install_directml_compat`). It is applied here, rather than at import
+    or in each entry point, so that no code path can reach a DirectML tensor
+    without the repair in place -- the bug it guards against corrupts data
+    silently.
+    """
+    backend = _resolve_backend()
+    if backend == BACKEND_DIRECTML:
+        _install_directml_compat()
+    return backend
 
 
 @functools.lru_cache(maxsize=8)
@@ -423,6 +442,93 @@ def describe_device() -> str:
         return f"CPU: {os.cpu_count()} logical cores"
     except Exception:  # pragma: no cover
         return "CPU"
+
+
+_directml_compat_installed = False
+
+
+def _install_directml_compat() -> None:
+    """Repair DirectML's type promotion for ``float * bool``.
+
+    This is the most dangerous DirectML defect found: multiplying a float
+    tensor by a bool tensor returns a **bool** tensor and discards the values,
+    where every other backend promotes to float. ::
+
+        x = torch.randn(2, 4, 3, device=dml)
+        m = torch.ones(2, 4, 1, dtype=torch.bool, device=dml)
+        (x * m).dtype   # torch.bool, and x's values are gone
+
+    ``x * mask[..., None]`` is the standard masking idiom here and appears in
+    about forty places across the flow matcher and feature factories. Patching
+    each call site would leave silent corruption behind the first one missed --
+    and the corruption is silent precisely because bool is a valid dtype, so
+    the error only surfaces later (or never, just as wrong coordinates).
+
+    Patching multiplication itself fixes every site at once, including the
+    vendored openfold and colabdesign code. Scalars are untouched, and
+    ``bool * bool`` stays bool so pair masks still work.
+
+    Idempotent, and a no-op on every backend other than DirectML.
+    """
+    global _directml_compat_installed
+    if _directml_compat_installed:
+        return
+    _directml_compat_installed = True
+
+    original_mul = torch.Tensor.mul
+    original_imul = torch.Tensor.mul_
+
+    def _promote(a: Any, b: Any) -> tuple[Any, Any]:
+        """Cast a lone bool operand up to the other operand's dtype."""
+        if isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor):
+            if a.dtype == torch.bool and b.dtype != torch.bool:
+                a = a.to(b.dtype)
+            elif b.dtype == torch.bool and a.dtype != torch.bool:
+                b = b.to(a.dtype)
+        return a, b
+
+    def patched_mul(self: Any, other: Any, *args: Any, **kwargs: Any) -> Any:
+        self, other = _promote(self, other)
+        return original_mul(self, other, *args, **kwargs)
+
+    def patched_mul_(self: Any, other: Any, *args: Any, **kwargs: Any) -> Any:
+        # In-place cannot change self's dtype, so only `other` is adjusted.
+        if isinstance(other, torch.Tensor) and other.dtype == torch.bool and self.dtype != torch.bool:
+            other = other.to(self.dtype)
+        return original_imul(self, other, *args, **kwargs)
+
+    torch.Tensor.mul = patched_mul
+    torch.Tensor.__mul__ = patched_mul
+    torch.Tensor.__rmul__ = patched_mul
+    torch.Tensor.mul_ = patched_mul_
+    torch.Tensor.__imul__ = patched_mul_
+
+    logger.debug("Installed DirectML float*bool promotion fix")
+
+
+def inference_context() -> Any:
+    """Return the strictest no-grad context the active backend can survive.
+
+    ``torch.inference_mode()`` is the right choice almost everywhere: it skips
+    version-counter bookkeeping and is faster than ``torch.no_grad()``.
+
+    DirectML cannot support it. Multiplying by a view of a batch tensor inside
+    inference mode raises::
+
+        RuntimeError: Cannot set version_counter for inference tensor
+
+    which kills sampling in the flow matcher. The same code is fine under
+    ``torch.no_grad()``, so DirectML gets that instead -- correctness over the
+    small bookkeeping saving.
+
+    Usable as either a decorator or a context manager::
+
+        @inference_context()
+        def predict_step(self, batch, batch_idx): ...
+    """
+    if get_backend() == BACKEND_DIRECTML:
+        return torch.no_grad()
+    return torch.inference_mode(mode=True)
 
 
 def eye(

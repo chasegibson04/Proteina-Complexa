@@ -48,7 +48,7 @@ def _bench_one(seq_len: int, dim: int, heads: int, layers: int, iters: int, warm
     x = torch.randn(1, seq_len, dim, device=device)
     pair = torch.randn(1, seq_len, seq_len, 32, device=device)
 
-    def forward() -> "torch.Tensor":
+    def forward() -> torch.Tensor:
         h = x
         for i in range(layers):
             normed = norm[i](h)
