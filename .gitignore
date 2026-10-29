@@ -103,3 +103,6 @@ tests/test_eval_generated/
 .vscode-server/
 .claude.json*
 params
+
+# Local validation data from the PTC 766 project (not for publication)
+validation_766ptc/

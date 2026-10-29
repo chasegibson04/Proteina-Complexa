@@ -1,3 +1,17 @@
 assets/data/*.csv filter=lfs diff=lfs merge=lfs -text
 assets/data/teddymer_valid_ids.txt filter=lfs diff=lfs merge=lfs -text
 assets/pipeline_figure.png filter=lfs diff=lfs merge=lfs -text
+
+# Scripts and configs must keep LF endings. Without these rules a clone on
+# Windows gets CRLF and every shell script fails under bash/WSL/Docker with
+# "$'\r': command not found" -- including env/download_startup.sh, so model
+# weights cannot be fetched at all.
+*.sh text eol=lf
+*.bash text eol=lf
+*.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.toml text eol=lf
+*.cfg text eol=lf
+Dockerfile text eol=lf
+Makefile text eol=lf
