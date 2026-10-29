@@ -72,6 +72,52 @@ def test_empty_cache_and_synchronize_never_raise():
     synchronize()
 
 
+def test_directml_is_never_auto_selected():
+    """DirectML must require an explicit opt-in.
+
+    It produces measurably worse structures than CPU (mean CA-CA 4.86-5.55 A
+    against 3.80 A on the same target) and the cause is unidentified, so
+    auto-detection must never choose it: the failure is silent, and a user who
+    did not ask for it would get quietly degraded results.
+    """
+    env = dict(os.environ)
+    env.pop("COMPLEXA_DEVICE", None)
+    code = (
+        "from proteinfoundation.utils.device_utils import get_backend;"
+        "b = get_backend();"
+        "assert b != 'directml', 'DirectML was auto-selected';"
+        "print(b)"
+    )
+    out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert "directml" not in out.stdout
+
+
+def test_directml_opt_in_warns_loudly():
+    """Choosing DirectML explicitly must say what it costs."""
+    if _directml_available() is False:
+        pytest.skip("torch_directml not installed")
+    env = dict(os.environ, COMPLEXA_DEVICE="directml")
+    code = (
+        "import sys;"
+        "from loguru import logger;"
+        "logger.remove(); logger.add(sys.stderr, level='WARNING');"
+        "from proteinfoundation.utils.device_utils import get_backend;"
+        "get_backend()"
+    )
+    out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
+    assert "EXPERIMENTAL" in out.stderr
+
+
+def _directml_available() -> bool:
+    try:
+        import torch_directml
+
+        return torch_directml.device_count() > 0
+    except Exception:
+        return False
+
+
 def test_explicit_cpu_override_in_subprocess():
     """COMPLEXA_DEVICE=cpu must force the CPU backend regardless of hardware."""
     env = dict(os.environ, COMPLEXA_DEVICE="cpu")

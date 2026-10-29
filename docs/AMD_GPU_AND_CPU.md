@@ -15,11 +15,44 @@ you commit to a long design run.
 |---|---|---|
 | `cuda` | NVIDIA | Unchanged from upstream; still preferred when present. |
 | `rocm` | AMD GPUs on ROCm-supported Linux (gfx90a, gfx942, gfx1100/1101/1102, gfx1200/1201, and gfx1030 on bare-metal Linux) | Supported. PyTorch's ROCm build presents as `torch.cuda`, so the CUDA path is reused. |
-| `directml` | AMD / Intel / Qualcomm GPUs on Windows and WSL2 | Supported with the caveats below. The only route to a consumer AMD GPU under Windows. |
+| `directml` | AMD / Intel / Qualcomm GPUs on Windows and WSL2 | **Experimental, opt-in only.** Runs end to end and is 2–5× faster than CPU, but produces measurably worse structures. See [Why DirectML is opt-in](#why-directml-is-opt-in). |
 | `mps` | Apple silicon | Selected automatically; lightly tested. |
-| `cpu` | Anything | Always available. |
+| `cpu` | Anything | Always available. Verified correct — see [Validation](#validation). |
 
-Selection order is `cuda/rocm -> directml -> mps -> cpu`.
+Selection order is `cuda/rocm -> mps -> cpu`. **DirectML is never selected
+automatically**; it must be requested with `COMPLEXA_DEVICE=directml`.
+
+## Validation
+
+Measured on this hardware with the shipped `39_7V11_LIGAND` target, the shipped
+400 sampling steps, single-pass search, and the released ligand checkpoint —
+three samples per backend, geometry checked with
+`script_utils/gpu_time/validate_backend_outputs.py`:
+
+| Backend | mean CA–CA (ideal 3.80 Å) | backbone bonds out of tolerance | CA–CA clashes | radius of gyration (expected ~12.7 Å) |
+|---|---|---|---|---|
+| CPU | 3.807 / 3.798 / 3.796 Å | 0 / 299 in all three | 0 / 0 / 0 | 12.4 / 12.3 / 12.1 Å |
+| DirectML | 4.856 / 5.152 / 5.551 Å | ~63% in all three | 3 / 8 / 12 | 12.9 / 12.4 / 12.4 Å |
+
+The CPU path reproduces correct protein geometry consistently. DirectML gets
+the global fold right — the radius of gyration is fine — but the local geometry
+is wrong, and consistently so across samples, which rules out sampling noise.
+
+## Why DirectML is opt-in
+
+The degradation above has no identified cause. Roughly 110 individual
+operations were compared against the CPU on identical inputs — matmul, einsum,
+`scaled_dot_product_attention` with and without bias, layer norm, softmax,
+reductions, gather/scatter, advanced indexing, `bucketize`, the distance-binning
+path, SVD, and the complete `PairBiasAttention` module in isolation — and all
+agree to fp32 noise (~1e-7). Precision at the model's real sizes (dim 768,
+sequence 64–256) is identical to the CPU as well. Something in the assembled
+model still diverges.
+
+Because the failure is silent — the run exits 0 and writes plausible-looking
+PDBs — auto-detection prefers the CPU, and asking for DirectML logs a warning.
+Use it for throughput experiments, not for results you intend to trust, and
+check anything it produces with the validator.
 
 ## Choosing a backend
 
@@ -182,7 +215,7 @@ rather than failing, so coverage gaps cost performance, not correctness. The
 exceptions are the three hard aborts listed above, which is why they are
 intercepted rather than left to fall back.
 
-## Measured performance
+## Measured throughput
 
 AMD Radeon RX 6800 (16 GB, gfx1030) under WSL2 against an Intel Xeon Gold 5218R
 using 32 threads. Six pair-bias attention layers, `dim=512`, 8 heads, fp32,
@@ -195,17 +228,19 @@ milliseconds per forward pass:
 | 384 | 38.8 ms | 7.6 ms | 5.10x |
 | 512 | 73.2 ms | 59.2 ms | 1.24x |
 
-The speed-up grows with sequence length up to ~384, which is the expected shape
-for a dispatch-overhead-bound backend: DirectML has no graph capture, so small
-problems are dominated by per-operation dispatch cost.
+End to end, one 100-residue ligand-binder sample at 400 steps took about 10
+minutes on DirectML against about 17 minutes on CPU.
 
-The regression at length 512 is real and reproducible. It is not a correctness
-problem, and it is a known rough edge rather than something this port fixes.
+The speed-up grows with sequence length up to ~384, as expected for a
+dispatch-overhead-bound backend with no graph capture. The regression at 512 is
+real and reproducible, and is a known rough edge rather than something this
+port fixes.
 
-This is well short of what the hardware could do — the RX 6800 is roughly 16
-TFLOP/s fp32 against roughly 1.3 TFLOP/s for the Xeon — but DirectML is a
-compatibility layer, not a tuned compute stack. If you have a ROCm-supported GPU
-or bare-metal Linux, use ROCm instead.
+This is well short of the hardware's potential -- the RX 6800 is roughly 16
+TFLOP/s fp32 against roughly 1.3 for the Xeon -- but DirectML is a
+compatibility layer, not a tuned compute stack. Given the accuracy problem
+above, the speed is currently of limited use. If you have a ROCm-supported GPU
+or bare-metal Linux, use ROCm.
 
 ## CPU-only operation
 

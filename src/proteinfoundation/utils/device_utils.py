@@ -15,13 +15,28 @@ Backend         Notes
 ``directml``    AMD/Intel/Qualcomm via DirectML (Windows and WSL2).  The only
                 route to a *consumer* AMD GPU such as an RX 6800 under Windows,
                 because AMD's ROCm WSL support covers RDNA3/RDNA4 only.
+                **Experimental and never auto-selected** -- see below.
 ``mps``         Apple silicon.
 ``cpu``         Always available.
 ==============  ==================================================================
 
-Selection order is ``cuda/rocm -> directml -> mps -> cpu`` and can be overridden
-with the ``COMPLEXA_DEVICE`` environment variable (``auto``, ``cuda``, ``rocm``,
+Selection order is ``cuda/rocm -> mps -> cpu`` and can be overridden with the
+``COMPLEXA_DEVICE`` environment variable (``auto``, ``cuda``, ``rocm``,
 ``directml``, ``mps``, ``cpu``, or an explicit string like ``cuda:1``).
+
+Why DirectML is opt-in
+----------------------
+It runs the whole pipeline and is 2-5x faster than a 32-thread CPU, but the
+structures it produces are measurably worse. On the shipped 7V11 ligand target,
+three CPU samples gave mean CA-CA 3.80 A with 0/299 backbone bonds out of
+tolerance and no clashes; three DirectML samples gave 4.86-5.55 A with ~63% of
+bonds out of tolerance and 3-12 clashes. Radius of gyration is correct in both,
+so the global fold is right and the local geometry is not.
+
+Every individual operation tested (~110 of them, including the full attention
+module in isolation) agrees with the CPU to fp32 noise, so the cause is not yet
+identified. Until it is, auto-detection prefers the CPU: a slow correct answer
+beats a fast wrong one, and the failure is silent.
 
 DirectML defects this module absorbs
 ------------------------------------
@@ -158,6 +173,14 @@ def _resolve_backend() -> str:
                     f"{_ENV_VAR}={requested!r} but torch_directml is unavailable or sees no device. "
                     "Install it with `pip install torch-directml` (requires torch 2.4.1)."
                 )
+            logger.warning(
+                "DirectML is EXPERIMENTAL and produces measurably worse structures than CPU or "
+                "CUDA/ROCm. On the shipped 7V11 target, CPU samples gave mean CA-CA 3.80 A with "
+                "no bad backbone bonds; DirectML gave 4.86-5.55 A with ~63% of bonds out of "
+                "tolerance. The cause is not yet identified. Use it for throughput experiments, "
+                "not for results you intend to trust -- and check output with "
+                "script_utils/gpu_time/validate_backend_outputs.py."
+            )
             return BACKEND_DIRECTML
         if base == BACKEND_MPS:
             if not _mps_usable():
@@ -170,17 +193,16 @@ def _resolve_backend() -> str:
     if _torch_cuda_usable():
         return BACKEND_ROCM if _is_rocm_build() else BACKEND_CUDA
 
-    dml = _directml_module()
-    if dml is not None:
-        try:
-            if dml.device_count() > 0:
-                return BACKEND_DIRECTML
-        except Exception:  # pragma: no cover
-            pass
-
     if _mps_usable():
         return BACKEND_MPS
 
+    # DirectML is deliberately NOT auto-selected, even when present. It runs the
+    # full pipeline and is faster than the CPU, but generated structures are
+    # measurably worse: on the shipped 7V11 target, three CPU samples gave mean
+    # CA-CA 3.80 A with no bad bonds, while three DirectML samples gave
+    # 4.86-5.55 A with ~63% of backbone bonds out of tolerance. The cause is not
+    # yet identified, so picking it automatically would hand users quietly
+    # degraded science. Opt in with COMPLEXA_DEVICE=directml.
     return BACKEND_CPU
 
 

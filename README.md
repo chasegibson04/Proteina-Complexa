@@ -85,11 +85,13 @@ Measured impact: on a 100-GPU, 200x10 best-of-N search job we observed a ~5x red
 > **Note**: Requires Ubuntu 22.04+ or equivalent. Ubuntu 20.04 will throw GLIBC errors due to older system libraries. Use Docker (Option 2) for older systems. The native UV installation defaults to
 Python 3.12. The [installation script](env/build_uv_env.sh) specifies PyTorch 2.7.0+cu126 and, for the full installation, JAX 0.4.29; additional dependencies are declared in [pyproject.toml](pyproject.toml). This path targets an NVIDIA CUDA-capable GPU; we tested on A100.
 
-> **AMD GPUs and CPU-only machines.** Inference also runs on AMD GPUs (ROCm, or
-> DirectML on Windows/WSL2) and on CPU. Backend selection is automatic and can be
-> pinned with `COMPLEXA_DEVICE`. See the
-> [AMD GPU and CPU guide](docs/AMD_GPU_AND_CPU.md) for setup, measured performance,
-> and the backend-specific caveats.
+> **AMD GPUs and CPU-only machines.** Inference also runs on AMD GPUs via ROCm,
+> and on CPU. Backend selection is automatic and can be pinned with
+> `COMPLEXA_DEVICE`. A DirectML backend (AMD/Intel GPUs on Windows and WSL2)
+> exists but is experimental and opt-in: it is faster than CPU yet produces
+> measurably worse geometry. See the
+> [AMD GPU and CPU guide](docs/AMD_GPU_AND_CPU.md) for setup, measured numbers,
+> and the caveats.
 
 ```bash
 git clone https://github.com/NVIDIA-Digital-Bio/Proteina-Complexa
