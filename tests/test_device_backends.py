@@ -332,6 +332,72 @@ def test_masking_preserves_values_where_mask_is_true():
     torch.testing.assert_close(out[0, 2:], torch.zeros(2, 3))
 
 
+def test_inplace_slice_write_lands():
+    """Regression: `t[:, :, 1, :] = src` was SILENTLY DROPPED on DirectML.
+
+    __getitem__ with an integer index followed by further slicing returns a
+    copy rather than a view there, so the write went nowhere and the tensor
+    stayed zero. This is exactly how the model builds its coordinate tensor
+    (x_t_coord[:, :, 1, :] = bb_ca), so every distance feature saw zeros.
+    """
+    device = get_device()
+    t = torch.zeros(2, 4, 6, 3, device=device)
+    src = torch.full((2, 4, 3), 5.0, device=device)
+    t[:, :, 1, :] = src
+
+    got = t.cpu()
+    assert got.abs().max() > 0, "in-place slice write was dropped"
+    torch.testing.assert_close(got[:, :, 1, :], torch.full((2, 4, 3), 5.0))
+    # Untouched slots must stay zero.
+    torch.testing.assert_close(got[:, :, 0, :], torch.zeros(2, 4, 3))
+    torch.testing.assert_close(got[:, :, 2, :], torch.zeros(2, 4, 3))
+
+
+def test_inplace_slice_write_matches_cpu_exactly():
+    torch.manual_seed(0)
+    src_cpu = torch.randn(2, 4, 3)
+    expected = torch.zeros(2, 4, 6, 3)
+    expected[:, :, 1, :] = src_cpu
+
+    device = get_device()
+    got = torch.zeros(2, 4, 6, 3, device=device)
+    got[:, :, 1, :] = src_cpu.to(device)
+    torch.testing.assert_close(got.cpu(), expected)
+
+
+def test_inplace_write_trailing_int_index():
+    """The `mask[:, :, 1] = m` form (integer last) must also be correct."""
+    device = get_device()
+    t = torch.zeros(2, 4, 6, device=device)
+    t[:, :, 1] = torch.ones(2, 4, device=device)
+    got = t.cpu()
+    torch.testing.assert_close(got[:, :, 1], torch.ones(2, 4))
+    assert got.sum().item() == 8.0
+
+
+def test_inplace_write_scalar_and_multi_index():
+    """Scalar fills and multi-integer keys (the Kabsch SS[:, -1, -1] form)."""
+    device = get_device()
+    t = torch.zeros(2, 3, 3, device=device)
+    t[:, -1, -1] = 1.0
+    torch.testing.assert_close(t.cpu()[:, -1, -1], torch.ones(2))
+
+    u = torch.zeros(2, 4, 6, 3, device=device)
+    u[..., 0] = 2.0
+    torch.testing.assert_close(u.cpu()[..., 0], torch.full((2, 4, 6), 2.0))
+
+
+def test_inplace_write_full_tensor_forms():
+    device = get_device()
+    t = torch.zeros(3, 4, device=device)
+    t[:] = torch.ones(3, 4, device=device)
+    assert t.cpu().sum().item() == 12.0
+
+    u = torch.zeros(3, 4, device=device)
+    u[0] = torch.ones(4, device=device)
+    assert u.cpu().sum().item() == 4.0
+
+
 def test_cdist_has_the_right_shape():
     """Regression: DirectML's cdist returns [b, 1, n, 1] instead of [b, n, m].
 

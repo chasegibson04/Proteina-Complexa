@@ -563,7 +563,49 @@ def _install_directml_compat() -> None:
 
     torch.cdist = patched_cdist
 
-    logger.debug("Installed DirectML compatibility fixes (float*bool promotion, cdist)")
+    # In-place writes through a view made by mixed integer+slice indexing are
+    # SILENTLY DROPPED: `t[:, :, 1, :] = src` leaves t untouched, because
+    # __getitem__ returns a copy rather than a view there. This is how the
+    # model built its coordinate tensor
+    # (x_t_coord[:, :, 1, :] = bb_ca in concat_pair_feature_factory), so every
+    # distance feature saw zeros.
+    #
+    # select() and narrow() DO return real views whose in-place ops land, so
+    # the common "one integer index, everything else full slices" case is
+    # rewritten to select().copy_(). Anything more exotic round-trips through
+    # the CPU, which is slow but correct.
+    original_setitem = torch.Tensor.__setitem__
+
+    def patched_setitem(self: torch.Tensor, key: Any, value: Any) -> None:
+        if self.device.type != "privateuseone":
+            return original_setitem(self, key, value)
+
+        keys = key if isinstance(key, tuple) else (key,)
+        if all(isinstance(k, int | slice) for k in keys):
+            ints = [(dim, k) for dim, k in enumerate(keys) if isinstance(k, int)]
+            slices_are_full = all(k == slice(None) for k in keys if isinstance(k, slice))
+            if slices_are_full:
+                if not ints:
+                    return original_setitem(self, key, value)
+                if len(ints) == 1:
+                    dim, idx = ints[0]
+                    target = self.select(dim, idx)
+                    if not isinstance(value, torch.Tensor):
+                        value = torch.as_tensor(value, dtype=self.dtype, device=self.device)
+                    target.copy_(value.expand_as(target) if value.shape != target.shape else value)
+                    return None
+
+        host = self.cpu()
+        original_setitem(host, key, value.cpu() if isinstance(value, torch.Tensor) else value)
+        self.copy_(host.to(self.device))
+        return None
+
+    torch.Tensor.__setitem__ = patched_setitem
+
+    logger.debug(
+        "Installed DirectML compatibility fixes "
+        "(float*bool promotion, cdist, dropped in-place slice writes)"
+    )
 
 
 def inference_context() -> Any:
