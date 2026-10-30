@@ -72,41 +72,43 @@ def test_empty_cache_and_synchronize_never_raise():
     synchronize()
 
 
-def test_directml_is_never_auto_selected():
-    """DirectML must require an explicit opt-in.
+def test_auto_detection_prefers_a_gpu_when_one_exists():
+    """Auto-detection should pick an available GPU over the CPU.
 
-    It produces measurably worse structures than CPU (mean CA-CA 4.86-5.55 A
-    against 3.80 A on the same target) and the cause is unidentified, so
-    auto-detection must never choose it: the failure is silent, and a user who
-    did not ask for it would get quietly degraded results.
+    DirectML was briefly excluded here while it produced degraded geometry;
+    that was a silent in-place-write bug (see
+    test_inplace_slice_write_lands), and output now matches CPU, so it is
+    auto-selected again.
     """
     env = dict(os.environ)
     env.pop("COMPLEXA_DEVICE", None)
     code = (
-        "from proteinfoundation.utils.device_utils import get_backend;"
-        "b = get_backend();"
-        "assert b != 'directml', 'DirectML was auto-selected';"
-        "print(b)"
+        "from proteinfoundation.utils.device_utils import get_backend; print(get_backend())"
     )
     out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
     assert out.returncode == 0, out.stderr
-    assert "directml" not in out.stdout
+    chosen = out.stdout.strip().splitlines()[-1]
+    assert chosen in ALL_BACKENDS
+    if _directml_available():
+        assert chosen != BACKEND_CPU, "a DirectML device exists but the CPU was chosen"
 
 
-def test_directml_opt_in_warns_loudly():
-    """Choosing DirectML explicitly must say what it costs."""
-    if _directml_available() is False:
+def test_directml_opt_in_is_honoured():
+    """An explicit DirectML request must select it and allocate there."""
+    if not _directml_available():
         pytest.skip("torch_directml not installed")
     env = dict(os.environ, COMPLEXA_DEVICE="directml")
     code = (
-        "import sys;"
-        "from loguru import logger;"
-        "logger.remove(); logger.add(sys.stderr, level='WARNING');"
-        "from proteinfoundation.utils.device_utils import get_backend;"
-        "get_backend()"
+        "import torch;"
+        "from proteinfoundation.utils.device_utils import get_backend, get_device;"
+        "assert get_backend() == 'directml';"
+        "x = torch.ones(8, device=get_device());"
+        "assert float(x.sum().cpu()) == 8.0;"
+        "print('ok')"
     )
     out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
-    assert "EXPERIMENTAL" in out.stderr
+    assert out.returncode == 0, out.stderr
+    assert "ok" in out.stdout
 
 
 def _directml_available() -> bool:

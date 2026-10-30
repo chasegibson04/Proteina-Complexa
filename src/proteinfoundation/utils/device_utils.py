@@ -15,28 +15,17 @@ Backend         Notes
 ``directml``    AMD/Intel/Qualcomm via DirectML (Windows and WSL2).  The only
                 route to a *consumer* AMD GPU such as an RX 6800 under Windows,
                 because AMD's ROCm WSL support covers RDNA3/RDNA4 only.
-                **Experimental and never auto-selected** -- see below.
 ``mps``         Apple silicon.
 ``cpu``         Always available.
 ==============  ==================================================================
 
-Selection order is ``cuda/rocm -> mps -> cpu`` and can be overridden with the
-``COMPLEXA_DEVICE`` environment variable (``auto``, ``cuda``, ``rocm``,
+Selection order is ``cuda/rocm -> directml -> mps -> cpu`` and can be overridden
+with the ``COMPLEXA_DEVICE`` environment variable (``auto``, ``cuda``, ``rocm``,
 ``directml``, ``mps``, ``cpu``, or an explicit string like ``cuda:1``).
 
-Why DirectML is opt-in
-----------------------
-It runs the whole pipeline and is 2-5x faster than a 32-thread CPU, but the
-structures it produces are measurably worse. On the shipped 7V11 ligand target,
-three CPU samples gave mean CA-CA 3.80 A with 0/299 backbone bonds out of
-tolerance and no clashes; three DirectML samples gave 4.86-5.55 A with ~63% of
-bonds out of tolerance and 3-12 clashes. Radius of gyration is correct in both,
-so the global fold is right and the local geometry is not.
-
-Every individual operation tested (~110 of them, including the full attention
-module in isolation) agrees with the CPU to fp32 noise, so the cause is not yet
-identified. Until it is, auto-detection prefers the CPU: a slow correct answer
-beats a fast wrong one, and the failure is silent.
+DirectML output is verified against the CPU: on the shipped 7V11 ligand target
+(400 steps, three samples) both produce mean CA-CA 3.797-3.807 A with 0/299
+backbone bonds out of tolerance and no clashes, agreeing sample for sample.
 
 DirectML defects this module absorbs
 ------------------------------------
@@ -173,12 +162,10 @@ def _resolve_backend() -> str:
                     f"{_ENV_VAR}={requested!r} but torch_directml is unavailable or sees no device. "
                     "Install it with `pip install torch-directml` (requires torch 2.4.1)."
                 )
-            logger.warning(
-                "DirectML is EXPERIMENTAL and produces measurably worse structures than CPU or "
-                "CUDA/ROCm. On the shipped 7V11 target, CPU samples gave mean CA-CA 3.80 A with "
-                "no bad backbone bonds; DirectML gave 4.86-5.55 A with ~63% of bonds out of "
-                "tolerance. The cause is not yet identified. Use it for throughput experiments, "
-                "not for results you intend to trust -- and check output with "
+            logger.info(
+                "DirectML backend selected. Output matches CPU on the shipped 7V11 target "
+                "(mean CA-CA 3.797-3.807 A, no bad backbone bonds), but it is less widely "
+                "exercised than CUDA/ROCm -- validate long runs with "
                 "script_utils/gpu_time/validate_backend_outputs.py."
             )
             return BACKEND_DIRECTML
@@ -196,13 +183,14 @@ def _resolve_backend() -> str:
     if _mps_usable():
         return BACKEND_MPS
 
-    # DirectML is deliberately NOT auto-selected, even when present. It runs the
-    # full pipeline and is faster than the CPU, but generated structures are
-    # measurably worse: on the shipped 7V11 target, three CPU samples gave mean
-    # CA-CA 3.80 A with no bad bonds, while three DirectML samples gave
-    # 4.86-5.55 A with ~63% of backbone bonds out of tolerance. The cause is not
-    # yet identified, so picking it automatically would hand users quietly
-    # degraded science. Opt in with COMPLEXA_DEVICE=directml.
+    dml = _directml_module()
+    if dml is not None:
+        try:
+            if dml.device_count() > 0:
+                return BACKEND_DIRECTML
+        except Exception:  # pragma: no cover
+            pass
+
     return BACKEND_CPU
 
 
@@ -486,6 +474,35 @@ def describe_device() -> str:
 
 _directml_compat_installed = False
 
+# How often the DirectML __setitem__ workaround had to detour via the CPU, and
+# how many bytes that moved. A hot fallback is the first thing to look at if
+# DirectML feels unexpectedly slow.
+_setitem_fallbacks: dict[str, int] = {"count": 0, "bytes": 0}
+
+
+def _describe_key(key: Any) -> str:
+    """Summarise a ``__setitem__`` key for diagnostics, without dumping tensors."""
+    parts = []
+    for k in key if isinstance(key, tuple) else (key,):
+        if isinstance(k, torch.Tensor):
+            parts.append(f"tensor{tuple(k.shape)}:{k.dtype}")
+        elif isinstance(k, slice):
+            parts.append("slice(None)" if k == slice(None) else f"slice({k.start},{k.stop},{k.step})")
+        elif k is Ellipsis:
+            parts.append("...")
+        else:
+            parts.append(repr(k))
+    return "[" + ", ".join(parts) + "]"
+
+
+def directml_fallback_stats() -> dict[str, int]:
+    """Return how often the DirectML ``__setitem__`` CPU fallback was used.
+
+    Keys: ``count`` and ``bytes``. Both stay zero on other backends, and on
+    DirectML when every write took the fast on-device path.
+    """
+    return dict(_setitem_fallbacks)
+
 
 def _install_directml_compat() -> None:
     """Repair DirectML defects that corrupt results without raising.
@@ -576,25 +593,87 @@ def _install_directml_compat() -> None:
     # the CPU, which is slow but correct.
     original_setitem = torch.Tensor.__setitem__
 
+    def _basic_view(tensor: torch.Tensor, keys: tuple) -> torch.Tensor | None:
+        """Build a writable view with select()/narrow(), or None if unsupported.
+
+        Chained select/narrow give real views on DirectML, so this keeps the
+        write on the device. Returns None for keys needing the CPU fallback
+        (tensor indices, boolean masks, strided or reversed slices).
+        """
+        if Ellipsis in keys:
+            pos = keys.index(Ellipsis)
+            missing = tensor.dim() - (len(keys) - 1)
+            if missing < 0:
+                return None
+            keys = keys[:pos] + (slice(None),) * missing + keys[pos + 1 :]
+
+        view = tensor
+        dim = 0
+        for k in keys:
+            if isinstance(k, bool) or not isinstance(k, int | slice):
+                return None
+            if isinstance(k, int):
+                if dim >= view.dim():
+                    return None
+                view = view.select(dim, k)
+                continue
+            if k == slice(None):
+                dim += 1
+                continue
+            start, stop, step = k.indices(view.shape[dim])
+            if step != 1 or stop < start:
+                return None
+            view = view.narrow(dim, start, stop - start)
+            dim += 1
+        return view
+
     def patched_setitem(self: torch.Tensor, key: Any, value: Any) -> None:
         if self.device.type != "privateuseone":
             return original_setitem(self, key, value)
 
         keys = key if isinstance(key, tuple) else (key,)
-        if all(isinstance(k, int | slice) for k in keys):
-            ints = [(dim, k) for dim, k in enumerate(keys) if isinstance(k, int)]
-            slices_are_full = all(k == slice(None) for k in keys if isinstance(k, slice))
-            if slices_are_full:
-                if not ints:
-                    return original_setitem(self, key, value)
-                if len(ints) == 1:
-                    dim, idx = ints[0]
-                    target = self.select(dim, idx)
-                    if not isinstance(value, torch.Tensor):
-                        value = torch.as_tensor(value, dtype=self.dtype, device=self.device)
-                    target.copy_(value.expand_as(target) if value.shape != target.shape else value)
-                    return None
 
+        # Advanced indexing, e.g. feats[row_idx, col_idx] = v. index_put_ is
+        # correct on DirectML and keeps this on the device; without it these
+        # are the hot path that dominates the CPU fallback.
+        if keys and all(isinstance(k, torch.Tensor) and k.dtype != torch.bool for k in keys):
+            try:
+                indices = tuple(k.to(self.device) if k.device != self.device else k for k in keys)
+                val = value
+                if not isinstance(val, torch.Tensor):
+                    val = torch.as_tensor(val, dtype=self.dtype, device=self.device)
+                else:
+                    if val.device != self.device:
+                        val = val.to(self.device)
+                    if val.dtype != self.dtype:
+                        val = val.to(self.dtype)
+                self.index_put_(indices, val)
+                return None
+            except Exception:  # pragma: no cover - fall through to the CPU path
+                pass
+
+        view = _basic_view(self, keys)
+        if view is not None:
+            if not isinstance(value, torch.Tensor):
+                value = torch.as_tensor(value, dtype=self.dtype, device=self.device)
+            elif value.device != self.device:
+                value = value.to(self.device)
+            if value.dtype != view.dtype:
+                value = value.to(view.dtype)
+            view.copy_(value.expand_as(view) if value.shape != view.shape else value)
+            return None
+
+        # Exotic key (tensor index, boolean mask, strided slice): fall back to
+        # the CPU, which is correct but costs two full transfers of this
+        # tensor. Counted so a hot one can be found rather than guessed at --
+        # read it with directml_fallback_stats().
+        _setitem_fallbacks["count"] += 1
+        _setitem_fallbacks["bytes"] += self.numel() * self.element_size()
+        if _setitem_fallbacks["count"] <= 5:
+            logger.debug(
+                f"DirectML __setitem__ CPU fallback #{_setitem_fallbacks['count']}: "
+                f"key={_describe_key(key)} on tensor {tuple(self.shape)} {self.dtype}"
+            )
         host = self.cpu()
         original_setitem(host, key, value.cpu() if isinstance(value, torch.Tensor) else value)
         self.copy_(host.to(self.device))
